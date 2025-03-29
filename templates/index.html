@@ -483,12 +483,37 @@
                 });
             }
             
+            // Function to stop database update
+            function stopDatabaseUpdate() {
+                const statusDiv = document.getElementById('db-status') || document.createElement('div');
+                statusDiv.id = 'db-status';
+                statusDiv.innerHTML += '<p>Stopping database update...</p>';
+                document.body.appendChild(statusDiv);
+                
+                fetch('/api/stop_update', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log(data.message);
+                    statusDiv.innerHTML += `<p>${data.message}</p>`;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    statusDiv.innerHTML += `<p>Error stopping update: ${error}</p>`;
+                });
+            }
+            
             // Expose for admin use via console
             window.updateDatabase = updateDatabase;
             window.checkDatabaseStatus = checkDatabaseStatus;
             window.searchWithOptions = function(file, includePages) {
                 searchImage(file, includePages);
             };
+            window.stop = stopDatabaseUpdate;
         });
     </script>
 </body>

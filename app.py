@@ -306,8 +306,13 @@ def scrape_gallery(gallery_id, include_pages=True, session=None):
         logger.error(f"Error scraping gallery {gallery_id}: {e}")
         return None
 
+# Flag to control database update process
+update_running = False
+
 # Improved function to update database
 def update_database(start_id=1, end_id=400000, max_workers=8, include_pages=True):
+    global update_running
+    update_running = True
     # Create a session to be reused
     session = create_session()
     
@@ -349,6 +354,11 @@ def update_database(start_id=1, end_id=400000, max_workers=8, include_pages=True
     # Process batches with some parallelism but not too much
     with ThreadPoolExecutor(max_workers=3) as executor:
         for i in range(0, len(batches), 3):  # Process 3 batches at a time
+            # Check if we should stop
+            if not update_running:
+                logger.info("Database update stopped by user")
+                break
+                
             batch_group = batches[i:i+3]
             futures = [executor.submit(process_batch, batch) for batch in batch_group]
             for future in as_completed(futures):
@@ -513,6 +523,12 @@ def update_db_endpoint():
     thread.start()
     
     return jsonify({'message': f'Database update started for IDs {start_id} to {end_id}, including pages: {include_pages}'})
+
+@app.route('/api/stop_update', methods=['POST'])
+def stop_update_endpoint():
+    global update_running
+    update_running = False
+    return jsonify({'message': 'Database update stopping... It may take a few seconds to complete current batch.'})
 
 if __name__ == '__main__':
     # Use a production WSGI server like gunicorn in production
