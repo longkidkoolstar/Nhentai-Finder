@@ -422,99 +422,251 @@
                     noResults.style.display = 'block';
                 }
             }
-            
-            // Admin function to update database (can be protected behind authentication in production)
-            function updateDatabase(startId, endId, includePages = true) {
-                const statusDiv = document.getElementById('db-status') || document.createElement('div');
-                statusDiv.id = 'db-status';
-                statusDiv.innerHTML = `<p>Starting database update from ID ${startId} to ${endId}...</p>`;
-                document.body.appendChild(statusDiv);
-                
-                fetch('/api/update_db', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        start_id: startId,
-                        end_id: endId,
-                        include_pages: includePages
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    console.log(data.message);
-                    statusDiv.innerHTML += `<p>${data.message}</p>`;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    statusDiv.innerHTML += `<p>Error: ${error}</p>`;
-                });
-            }
-            
-            // Function to check database status
-            function checkDatabaseStatus() {
-                const statusDiv = document.getElementById('db-status') || document.createElement('div');
-                statusDiv.id = 'db-status';
-                statusDiv.innerHTML = '<p>Checking database status...</p>';
-                document.body.appendChild(statusDiv);
-                
-                fetch('/api/status')
-                .then(response => response.json())
-                .then(data => {
-                    let statusHTML = `
-                        <h3>Database Status</h3>
-                        <p>Total Galleries: ${data.gallery_count}</p>
-                        <p>Total Pages: ${data.page_count}</p>
-                        <h4>Recent Updates:</h4>
-                        <ul>
-                    `;
-                    
-                    data.recent_updates.forEach(update => {
-                        statusHTML += `<li>Gallery ${update.id}: ${update.title} (${update.timestamp})</li>`;
-                    });
-                    
-                    statusHTML += `</ul>`;
-                    statusDiv.innerHTML = statusHTML;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    statusDiv.innerHTML += `<p>Error fetching status: ${error}</p>`;
-                });
-            }
-            
-            // Function to stop database update
-            function stopDatabaseUpdate() {
-                const statusDiv = document.getElementById('db-status') || document.createElement('div');
-                statusDiv.id = 'db-status';
-                statusDiv.innerHTML += '<p>Stopping database update...</p>';
-                document.body.appendChild(statusDiv);
-                
-                fetch('/api/stop_update', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                })
-                .then(response => response.json())
-                .then(data => {
-                    console.log(data.message);
-                    statusDiv.innerHTML += `<p>${data.message}</p>`;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    statusDiv.innerHTML += `<p>Error stopping update: ${error}</p>`;
-                });
-            }
-            
-            // Expose for admin use via console
-            window.updateDatabase = updateDatabase;
-            window.checkDatabaseStatus = checkDatabaseStatus;
-            window.searchWithOptions = function(file, includePages) {
-                searchImage(file, includePages);
-            };
-            window.stop = stopDatabaseUpdate;
         });
+
+        // Expose admin functions for console use
+        window.updateDatabase = function(startId = 1, endId = 400000, concurrentGalleries = 20, includePages = true) {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML = `<p>Starting database update from ID ${startId} to ${endId} with ${concurrentGalleries} concurrent galleries...</p>`;
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/update_db', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    start_id: startId,
+                    end_id: endId,
+                    concurrent_galleries: concurrentGalleries,
+                    include_pages: includePages
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error: ${error}</p>`;
+            });
+        };
+
+        // Function to check database status
+        window.checkDatabaseStatus = function() {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML = '<p>Checking database status...</p>';
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/status')
+            .then(response => response.json())
+            .then(data => {
+                let statusHTML = `
+                    <h3>Database Status</h3>
+                    <p>Total Galleries: ${data.gallery_count}</p>
+                    <p>Total Pages: ${data.page_count}</p>
+                    <h4>Recent Updates:</h4>
+                    <ul>
+                `;
+                
+                data.recent_updates.forEach(update => {
+                    statusHTML += `<li>Gallery ${update.id}: ${update.title} (${update.timestamp})</li>`;
+                });
+                
+                statusHTML += `</ul>`;
+                statusDiv.innerHTML = statusHTML;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error fetching status: ${error}</p>`;
+            });
+        };
+
+        // Function to stop database update
+        window.stopDatabaseUpdate = function() {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML += '<p>Stopping database update...</p>';
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/stop_update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error stopping update: ${error}</p>`;
+            });
+        };
+
+        // Function to optimize the database
+        window.optimizeDatabase = function() {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML += '<p>Optimizing database...</p>';
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/optimize_db', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error optimizing database: ${error}</p>`;
+            });
+        };
+
+        // Function to clear cache
+        window.clearCache = function() {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML += '<p>Clearing cache...</p>';
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/clear_cache', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error clearing cache: ${error}</p>`;
+            });
+        };
+
+        // Function to refresh sessions
+        window.refreshSessions = function(poolSize = 30) {
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML += `<p>Refreshing session pool with ${poolSize} sessions...</p>`;
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/refresh_sessions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    pool_size: poolSize
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error refreshing sessions: ${error}</p>`;
+            });
+        };
+
+        // Function to fetch galleries in bulk
+        window.bulkFetch = function(galleryIds, includePages = true) {
+            if (!Array.isArray(galleryIds)) {
+                console.error('Gallery IDs must be an array');
+                return;
+            }
+            
+            if (galleryIds.length > 100) {
+                console.warn('Maximum number of galleries is 100. Truncating list.');
+                galleryIds = galleryIds.slice(0, 100);
+            }
+            
+            const statusDiv = document.getElementById('db-status') || document.createElement('div');
+            statusDiv.id = 'db-status';
+            statusDiv.innerHTML += `<p>Fetching ${galleryIds.length} galleries in bulk...</p>`;
+            document.body.appendChild(statusDiv);
+            
+            fetch('/api/bulk_fetch', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    gallery_ids: galleryIds,
+                    include_pages: includePages
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data.message);
+                statusDiv.innerHTML += `<p>${data.message}</p>`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                statusDiv.innerHTML += `<p>Error in bulk fetch: ${error}</p>`;
+            });
+        };
+
+        // Enhanced search function with options
+        window.searchWithOptions = function(file, includePages = true, limit = 10) {
+            if (!file) {
+                console.error('No file provided');
+                return;
+            }
+            
+            loading.style.display = 'block';
+            resultsContainer.style.display = 'none';
+            noResults.style.display = 'none';
+            
+            const formData = new FormData();
+            formData.append('image', file);
+            formData.append('search_pages', includePages);
+            formData.append('limit', limit);
+            
+            fetch('/api/search', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                loading.style.display = 'none';
+                displayResults(data);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                loading.style.display = 'none';
+                alert('An error occurred while searching. Please try again.');
+            });
+        };
+
+        // Helper text for console usage
+        console.log(`
+        === Nhentai Sauce Finder Admin Console ===
+        Available commands:
+        - updateDatabase(startId, endId, concurrentGalleries, includePages) - Update database with new galleries
+        - stopDatabaseUpdate() - Stop the current database update
+        - checkDatabaseStatus() - Show current database statistics
+        - optimizeDatabase() - Optimize the database (vacuum, analyze, etc.)
+        - clearCache() - Clear the gallery cache
+        - refreshSessions(poolSize) - Refresh the request session pool
+        - bulkFetch(galleryIds, includePages) - Fetch multiple galleries at once
+        - searchWithOptions(file, includePages, limit) - Search with custom options
+        `);
     </script>
 </body>
 </html>
