@@ -1,0 +1,7 @@
+Flask
+requests
+beautifulsoup4
+ImageHash
+Pillow
+sqlite3
+numpy

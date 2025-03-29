@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nhentai Sauce Finder</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+        }
+        
+        h1 {
+            color: #ed2553;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .upload-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px;
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            transition: all 0.3s;
+        }
+        
+        .upload-container.highlight {
+            border-color: #ed2553;
+            background-color: rgba(237, 37, 83, 0.05);
+        }
+        
+        .upload-container p {
+            margin-top: 15px;
+            color: #666;
+        }
+        
+        #file-input {
+            display: none;
+        }
+        
+        .upload-btn {
+            background-color: #ed2553;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+            margin-top: 15px;
+        }
+        
+        .upload-btn:hover {
+            background-color: #d41c47;
+        }
+        
+        .preview-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        #image-preview {
+            max-width: 300px;
+            max-height: 300px;
+            border-radius: 4px;
+            display: none;
+            margin: 0 auto;
+        }
+        
+        .results-container {
+            margin-top: 40px;
+            display: none;
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .result-card {
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s;
+            background: white;
+        }
+        
+        .result-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .result-image {
+            width: 100%;
+            height: 280px;
+            object-fit: cover;
+        }
+        
+        .result-info {
+            padding: 15px;
+        }
+        
+        .result-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        
+        .result-meta {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        
+        .similarity-bar {
+            height: 4px;
+            background-color: #eee;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        
+        .similarity-fill {
+            height: 100%;
+            background-color: #ed2553;
+        }
+        
+        .result-link {
+            display: block;
+            background-color: #ed2553;
+            color: white;
+            text-align: center;
+            padding: 8px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .result-link:hover {
+            background-color: #d41c47;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(237, 37, 83, 0.2);
+            border-left-color: #ed2553;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-top: 8px;
+        }
+        
+        .tag {
+            background-color: #f0f0f0;
+            color: #666;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            display: none;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #999;
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .results-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            }
+            
+            .result-image {
+                height: 200px;
+            }
+            
+            .container {
+                padding: 15px;
+            }
+            
+            .upload-container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Nhentai Sauce Finder</h1>
+        
+        <div id="upload-container" class="upload-container">
+            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <p>Drag & drop an image here or click to upload</p>
+            <input type="file" id="file-input" accept="image/*">
+            <button class="upload-btn" id="upload-btn">Upload Image</button>
+        </div>
+        
+        <div class="preview-container">
+            <img id="image-preview" src="" alt="Preview">
+        </div>
+        
+        <div class="loading">
+            <div class="loading-spinner"></div>
+            <p>Searching for sauce...</p>
+        </div>
+        
+        <div class="results-container" id="results-container">
+            <h2>Found Matches</h2>
+            <div class="results-grid" id="results-grid"></div>
+        </div>
+        
+        <div class="no-results" id="no-results">
+            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="8" y1="15" x2="16" y2="15"></line>
+                <line x1="9" y1="9" x2="9.01" y2="9"></line>
+                <line x1="15" y1="9" x2="15.01" y2="9"></line>
+            </svg>
+            <h3>No matches found</h3>
+            <p>Try uploading a different image or check back later as our database grows.</p>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <p>This tool is for educational purposes only. Use responsibly and respect the terms of service of the websites you interact with.</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const uploadContainer = document.getElementById('upload-container');
+            const fileInput = document.getElementById('file-input');
+            const uploadBtn = document.getElementById('upload-btn');
+            const imagePreview = document.getElementById('image-preview');
+            const resultsContainer = document.getElementById('results-container');
+            const resultsGrid = document.getElementById('results-grid');
+            const loading = document.querySelector('.loading');
+            const noResults = document.getElementById('no-results');
+            
+            // Handle drag & drop events
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                uploadContainer.addEventListener(eventName, preventDefaults, false);
+            });
+            
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            
+            ['dragenter', 'dragover'].forEach(eventName => {
+                uploadContainer.addEventListener(eventName, highlight, false);
+            });
+            
+            ['dragleave', 'drop'].forEach(eventName => {
+                uploadContainer.addEventListener(eventName, unhighlight, false);
+            });
+            
+            function highlight() {
+                uploadContainer.classList.add('highlight');
+            }
+            
+            function unhighlight() {
+                uploadContainer.classList.remove('highlight');
+            }
+            
+            uploadContainer.addEventListener('drop', handleDrop, false);
+            
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                
+                if (files.length > 0) {
+                    handleFiles(files);
+                }
+            }
+            
+            uploadBtn.addEventListener('click', () => {
+                fileInput.click();
+            });
+            
+            fileInput.addEventListener('change', function() {
+                if (this.files.length > 0) {
+                    handleFiles(this.files);
+                }
+            });
+            
+            function handleFiles(files) {
+                const file = files[0];
+                
+                if (!file.type.match('image.*')) {
+                    alert('Please upload an image file');
+                    return;
+                }
+                
+                const reader = new FileReader();
+                
+                reader.onload = function(e) {
+                    imagePreview.src = e.target.result;
+                    imagePreview.style.display = 'block';
+                    
+                    // Prepare to send the image to the server
+                    searchImage(file);
+                }
+                
+                reader.readAsDataURL(file);
+            }
+            
+            function searchImage(file) {
+                loading.style.display = 'block';
+                resultsContainer.style.display = 'none';
+                noResults.style.display = 'none';
+                
+                const formData = new FormData();
+                formData.append('image', file);
+                
+                fetch('/api/search', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    loading.style.display = 'none';
+                    
+                    if (data.length > 0) {
+                        displayResults(data);
+                        resultsContainer.style.display = 'block';
+                    } else {
+                        noResults.style.display = 'block';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    loading.style.display = 'none';
+                    alert('An error occurred while searching. Please try again.');
+                });
+            }
+            
+            function displayResults(results) {
+                resultsGrid.innerHTML = '';
+                
+                results.forEach(result => {
+                    const resultCard = document.createElement('div');
+                    resultCard.className = 'result-card';
+                    
+                    const maxTags = 3;
+                    const displayTags = result.tags.slice(0, maxTags);
+                    
+                    resultCard.innerHTML = `
+                        <img class="result-image" src="${result.thumbnail_url}" alt="${result.title}">
+                        <div class="result-info">
+                            <div class="result-title">${result.title}</div>
+                            <div class="result-meta">#${result.id} • ${result.page_count} pages</div>
+                            <div class="similarity-bar">
+                                <div class="similarity-fill" style="width: ${result.similarity}%"></div>
+                            </div>
+                            <div class="tags">
+                                ${displayTags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+                                ${result.tags.length > maxTags ? `<span class="tag">+${result.tags.length - maxTags} more</span>` : ''}
+                            </div>
+                            <a href="${result.url}" target="_blank" class="result-link">View Gallery</a>
+                        </div>
+                    `;
+                    
+                    resultsGrid.appendChild(resultCard);
+                });
+            }
+            
+            // Admin function to update database (can be protected behind authentication in production)
+            function updateDatabase(startId, endId) {
+                fetch('/api/update_db', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        start_id: startId,
+                        end_id: endId
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log(data.message);
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
+            }
+            
+            // Expose for admin use via console
+            window.updateDatabase = updateDatabase;
+        });
+    </script>
+</body>
+</html>
