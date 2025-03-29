@@ -415,6 +415,11 @@
             
             // Admin function to update database (can be protected behind authentication in production)
             function updateDatabase(startId, endId) {
+                const statusDiv = document.getElementById('db-status') || document.createElement('div');
+                statusDiv.id = 'db-status';
+                statusDiv.innerHTML = `<p>Starting database update from ID ${startId} to ${endId}...</p>`;
+                document.body.appendChild(statusDiv);
+                
                 fetch('/api/update_db', {
                     method: 'POST',
                     headers: {
@@ -428,14 +433,80 @@
                 .then(response => response.json())
                 .then(data => {
                     console.log(data.message);
+                    statusDiv.innerHTML += `<p>${data.message}</p>`;
                 })
                 .catch(error => {
                     console.error('Error:', error);
+                    statusDiv.innerHTML += `<p>Error: ${error}</p>`;
                 });
             }
             
+            // Function to check database status
+            function checkDatabaseStatus() {
+                const statusDiv = document.getElementById('db-status') || document.createElement('div');
+                statusDiv.id = 'db-status';
+                statusDiv.innerHTML = '<p>Checking database status...</p>';
+                document.body.appendChild(statusDiv);
+                
+                fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    let statusHTML = `
+                        <h3>Database Status</h3>
+                        <p>Total Galleries: ${data.gallery_count}</p>
+                        <p>Total Pages: ${data.page_count}</p>
+                        <h4>Recent Updates:</h4>
+                        <ul>
+                    `;
+                    
+                    data.recent_updates.forEach(update => {
+                        statusHTML += `<li>Gallery ${update.id}: ${update.title} (${update.timestamp})</li>`;
+                    });
+                    
+                    statusHTML += `</ul>`;
+                    statusDiv.innerHTML = statusHTML;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    statusDiv.innerHTML += `<p>Error fetching status: ${error}</p>`;
+                });
+            }
+            
+            // Add option to toggle page search
+            const searchOptionsDiv = document.createElement('div');
+            searchOptionsDiv.className = 'search-options';
+            searchOptionsDiv.innerHTML = `
+                <label>
+                    <input type="checkbox" id="search-pages" checked>
+                    Include individual pages in search
+                </label>
+            `;
+            document.querySelector('.container').insertBefore(searchOptionsDiv, document.getElementById('results'));
+            
+            // Update the searchImage function to include the search-pages option
+            const oldSearchImage = searchImage;
+            searchImage = function(file) {
+                const searchPages = document.getElementById('search-pages').checked;
+                
+                const formData = new FormData();
+                formData.append('image', file);
+                formData.append('search_pages', searchPages);
+                
+                fetch('/api/search', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(displayResults)
+                .catch(error => {
+                    console.error('Error:', error);
+                    document.getElementById('results').innerHTML = '<p>Error processing image. Please try again.</p>';
+                });
+            };
+            
             // Expose for admin use via console
             window.updateDatabase = updateDatabase;
+            window.checkDatabaseStatus = checkDatabaseStatus;
         });
     </script>
 </body>
