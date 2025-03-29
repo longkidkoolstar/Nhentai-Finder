@@ -1,0 +1,9 @@
+.match-info {
+    font-size: 12px;
+    background-color: #ed2553;
+    color: white;
+    padding: 3px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 8px;
+}

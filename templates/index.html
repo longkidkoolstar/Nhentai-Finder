@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nhentai Sauce Finder</title>
+    <link rel="stylesheet" href="/static/styles.css">
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -353,13 +354,14 @@
                 reader.readAsDataURL(file);
             }
             
-            function searchImage(file) {
+            function searchImage(file, includePages = true) {
                 loading.style.display = 'block';
                 resultsContainer.style.display = 'none';
                 noResults.style.display = 'none';
                 
                 const formData = new FormData();
                 formData.append('image', file);
+                formData.append('search_pages', includePages);
                 
                 fetch('/api/search', {
                     method: 'POST',
@@ -368,13 +370,7 @@
                 .then(response => response.json())
                 .then(data => {
                     loading.style.display = 'none';
-                    
-                    if (data.length > 0) {
-                        displayResults(data);
-                        resultsContainer.style.display = 'block';
-                    } else {
-                        noResults.style.display = 'block';
-                    }
+                    displayResults(data);
                 })
                 .catch(error => {
                     console.error('Error:', error);
@@ -386,35 +382,49 @@
             function displayResults(results) {
                 resultsGrid.innerHTML = '';
                 
-                results.forEach(result => {
-                    const resultCard = document.createElement('div');
-                    resultCard.className = 'result-card';
-                    
-                    const maxTags = 3;
-                    const displayTags = result.tags.slice(0, maxTags);
-                    
-                    resultCard.innerHTML = `
-                        <img class="result-image" src="${result.thumbnail_url}" alt="${result.title}">
-                        <div class="result-info">
-                            <div class="result-title">${result.title}</div>
-                            <div class="result-meta">#${result.id} • ${result.page_count} pages</div>
-                            <div class="similarity-bar">
-                                <div class="similarity-fill" style="width: ${result.similarity}%"></div>
+                if (results.length > 0) {
+                    results.forEach(result => {
+                        const resultCard = document.createElement('div');
+                        resultCard.className = 'result-card';
+                        
+                        const maxTags = 3;
+                        const displayTags = result.tags.slice(0, maxTags);
+                        
+                        // Determine if this is a page match or thumbnail match
+                        const isPageMatch = result.matched_type === 'page';
+                        const matchInfo = isPageMatch ? 
+                            `<div class="match-info">Matched on page ${result.page_number}</div>` : '';
+                        
+                        resultCard.innerHTML = `
+                            <img class="result-image" src="${result.thumbnail_url}" alt="${result.title}">
+                            <div class="result-info">
+                                <div class="result-title">${result.title}</div>
+                                <div class="result-meta">#${result.id} • ${result.page_count} pages</div>
+                                ${matchInfo}
+                                <div class="similarity-bar">
+                                    <div class="similarity-fill" style="width: ${result.similarity}%"></div>
+                                </div>
+                                <div class="tags">
+                                    ${displayTags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+                                    ${result.tags.length > maxTags ? `<span class="tag">+${result.tags.length - maxTags} more</span>` : ''}
+                                </div>
+                                <a href="${result.url}" target="_blank" class="result-link">View Gallery</a>
                             </div>
-                            <div class="tags">
-                                ${displayTags.map(tag => `<span class="tag">${tag}</span>`).join('')}
-                                ${result.tags.length > maxTags ? `<span class="tag">+${result.tags.length - maxTags} more</span>` : ''}
-                            </div>
-                            <a href="${result.url}" target="_blank" class="result-link">View Gallery</a>
-                        </div>
-                    `;
+                        `;
+                        
+                        resultsGrid.appendChild(resultCard);
+                    });
                     
-                    resultsGrid.appendChild(resultCard);
-                });
+                    resultsContainer.style.display = 'block';
+                    noResults.style.display = 'none';
+                } else {
+                    resultsContainer.style.display = 'none';
+                    noResults.style.display = 'block';
+                }
             }
             
             // Admin function to update database (can be protected behind authentication in production)
-            function updateDatabase(startId, endId) {
+            function updateDatabase(startId, endId, includePages = true) {
                 const statusDiv = document.getElementById('db-status') || document.createElement('div');
                 statusDiv.id = 'db-status';
                 statusDiv.innerHTML = `<p>Starting database update from ID ${startId} to ${endId}...</p>`;
@@ -427,7 +437,8 @@
                     },
                     body: JSON.stringify({
                         start_id: startId,
-                        end_id: endId
+                        end_id: endId,
+                        include_pages: includePages
                     })
                 })
                 .then(response => response.json())
@@ -472,41 +483,12 @@
                 });
             }
             
-            // Add option to toggle page search
-            const searchOptionsDiv = document.createElement('div');
-            searchOptionsDiv.className = 'search-options';
-            searchOptionsDiv.innerHTML = `
-                <label>
-                    <input type="checkbox" id="search-pages" checked>
-                    Include individual pages in search
-                </label>
-            `;
-            document.querySelector('.container').insertBefore(searchOptionsDiv, document.getElementById('results'));
-            
-            // Update the searchImage function to include the search-pages option
-            const oldSearchImage = searchImage;
-            searchImage = function(file) {
-                const searchPages = document.getElementById('search-pages').checked;
-                
-                const formData = new FormData();
-                formData.append('image', file);
-                formData.append('search_pages', searchPages);
-                
-                fetch('/api/search', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => response.json())
-                .then(displayResults)
-                .catch(error => {
-                    console.error('Error:', error);
-                    document.getElementById('results').innerHTML = '<p>Error processing image. Please try again.</p>';
-                });
-            };
-            
             // Expose for admin use via console
             window.updateDatabase = updateDatabase;
             window.checkDatabaseStatus = checkDatabaseStatus;
+            window.searchWithOptions = function(file, includePages) {
+                searchImage(file, includePages);
+            };
         });
     </script>
 </body>
