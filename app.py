@@ -3,8 +3,11 @@ from flask import Flask, request, jsonify, render_template, current_app
 import requests
 from bs4 import BeautifulSoup
 import imagehash
-from PIL import Image
+from PIL import Image, ImageFile
 import io
+
+# Configure PIL to handle truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 import sqlite3
 import os
 import time
@@ -127,10 +130,33 @@ def scrape_gallery_pages(gallery_id, page_count, session=None):
             image_response = session.get(image_url, timeout=20)
             
             if image_response.status_code == 200:
-                page_img = Image.open(io.BytesIO(image_response.content))
-                page_phash = str(imagehash.phash(page_img))
-                
-                return (gallery_id, page_num, image_url, page_phash)
+                try:
+                    # Try to open the image with PIL's built-in truncated image handling
+                    page_img = Image.open(io.BytesIO(image_response.content))
+                    # Force image loading to detect truncation issues early
+                    page_img.load()
+                    page_phash = str(imagehash.phash(page_img))
+                    
+                    return (gallery_id, page_num, image_url, page_phash)
+                except OSError as img_err:
+                    # Handle truncated image errors specifically
+                    if "truncated" in str(img_err).lower():
+                        logger.warning(f"Truncated image detected for page {page_num} of gallery {gallery_id}, attempting recovery")
+                        try:
+                            # Try to recover using a more permissive approach
+                            from PIL import ImageFile
+                            ImageFile.LOAD_TRUNCATED_IMAGES = True
+                            page_img = Image.open(io.BytesIO(image_response.content))
+                            page_img.load()
+                            page_phash = str(imagehash.phash(page_img))
+                            logger.info(f"Successfully recovered truncated image for page {page_num} of gallery {gallery_id}")
+                            return (gallery_id, page_num, image_url, page_phash)
+                        except Exception as recovery_err:
+                            logger.error(f"Failed to recover truncated image for page {page_num} of gallery {gallery_id}: {recovery_err}")
+                            return None
+                    else:
+                        # Re-raise other image errors
+                        raise
             else:
                 logger.warning(f"Failed to download image for page {page_num} of gallery {gallery_id}")
                 return None
@@ -222,8 +248,30 @@ def scrape_gallery(gallery_id, include_pages=True, session=None):
         if thumbnail_url:
             img_response = session.get(thumbnail_url, timeout=15)
             if img_response.status_code == 200:
-                img = Image.open(io.BytesIO(img_response.content))
-                phash = str(imagehash.phash(img))
+                try:
+                    # Try to open the image with PIL's built-in truncated image handling
+                    img = Image.open(io.BytesIO(img_response.content))
+                    # Force image loading to detect truncation issues early
+                    img.load()
+                    phash = str(imagehash.phash(img))
+                except OSError as img_err:
+                    # Handle truncated image errors specifically
+                    if "truncated" in str(img_err).lower():
+                        logger.warning(f"Truncated thumbnail image detected for gallery {gallery_id}, attempting recovery")
+                        try:
+                            # Try to recover using a more permissive approach
+                            from PIL import ImageFile
+                            ImageFile.LOAD_TRUNCATED_IMAGES = True
+                            img = Image.open(io.BytesIO(img_response.content))
+                            img.load()
+                            phash = str(imagehash.phash(img))
+                            logger.info(f"Successfully recovered truncated thumbnail image for gallery {gallery_id}")
+                        except Exception as recovery_err:
+                            logger.error(f"Failed to recover truncated thumbnail image for gallery {gallery_id}: {recovery_err}")
+                    else:
+                        # Log other image errors
+                        logger.error(f"Error processing thumbnail for gallery {gallery_id}: {img_err}")
+                        # Continue without a phash
         
         # Store gallery in database
         conn = get_db_connection()

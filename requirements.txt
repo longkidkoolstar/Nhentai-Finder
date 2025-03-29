@@ -5,3 +5,4 @@ ImageHash
 Pillow
 sqlite3
 numpy
+urllib3
