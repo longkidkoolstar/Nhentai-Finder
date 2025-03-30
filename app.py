@@ -13,12 +13,18 @@ import os
 import time
 import threading
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 import re
 import functools
 import logging
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import multiprocessing
+import queue
+import random
+import cachetools
+import ujson as json  # Faster JSON processing
+from lru import LRU  # More efficient LRU cache
 
 app = Flask(__name__)
 
@@ -29,12 +35,16 @@ logger = logging.getLogger(__name__)
 # Flag to control database update process
 update_running = False
 
-# Gallery cache
-gallery_cache = {}
+# Gallery cache - upgraded to LRU cache with 10,000 item capacity
+gallery_cache = LRU(10000)
 
 # Session pool
 session_pool = []
 session_pool_lock = threading.Lock()
+
+# CPU count for optimal thread allocation
+CPU_COUNT = multiprocessing.cpu_count()
+MAX_WORKERS = CPU_COUNT * 4  # Optimal thread count for I/O bound operations
 
 # Database connection pool
 class DBConnectionPool:
@@ -43,6 +53,7 @@ class DBConnectionPool:
         self.connections = []
         self.in_use = set()
         self.lock = threading.Lock()
+        self.connection_queue = queue.Queue()
         
     def get_connection(self):
         with self.lock:
@@ -51,8 +62,9 @@ class DBConnectionPool:
                 conn.row_factory = sqlite3.Row
                 conn.execute('PRAGMA journal_mode=WAL')
                 conn.execute('PRAGMA synchronous=NORMAL')
-                conn.execute('PRAGMA cache_size=10000')
+                conn.execute('PRAGMA cache_size=50000')  # Increased cache size
                 conn.execute('PRAGMA temp_store=MEMORY')
+                conn.execute('PRAGMA mmap_size=30000000000')  # Memory-mapped I/O for faster access
                 self.connections.append(conn)
                 self.in_use.add(conn)
                 return conn
@@ -61,17 +73,24 @@ class DBConnectionPool:
                     if conn not in self.in_use:
                         self.in_use.add(conn)
                         return conn
-                # All connections in use, wait and retry
-                time.sleep(0.1)
-                return self.get_connection()
+                # All connections in use, wait and retry with exponential backoff
+                try:
+                    return self.connection_queue.get(timeout=0.1)
+                except queue.Empty:
+                    time.sleep(0.05)
+                    return self.get_connection()
                 
     def release_connection(self, conn):
         with self.lock:
             if conn in self.in_use:
                 self.in_use.remove(conn)
+                try:
+                    self.connection_queue.put(conn, block=False)
+                except queue.Full:
+                    pass  # Queue is full, just release the connection
 
-# Create a global connection pool
-db_pool = DBConnectionPool(max_size=30)
+# Create a global connection pool with more connections
+db_pool = DBConnectionPool(max_size=CPU_COUNT * 8)
 
 # Standard database connection function for backward compatibility
 def get_db_connection():
@@ -79,8 +98,9 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA cache_size=10000')
+    conn.execute('PRAGMA cache_size=50000')  # Increased cache size
     conn.execute('PRAGMA temp_store=MEMORY')
+    conn.execute('PRAGMA mmap_size=30000000000')  # Memory-mapped I/O for faster access
     return conn
 
 def init_db():
@@ -129,7 +149,7 @@ def init_db():
 init_db()
 
 # Session management with connection pooling
-def create_session_pool(pool_size=20):
+def create_session_pool(pool_size=MAX_WORKERS):
     global session_pool
     with session_pool_lock:
         session_pool = []
@@ -145,19 +165,30 @@ def create_session_pool(pool_size=20):
             'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
             'Mozilla/5.0 (iPad; CPU OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:92.0) Gecko/20100101 Firefox/92.0'
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:92.0) Gecko/20100101 Firefox/92.0',
+            # Added more user agents for better rotation
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:95.0) Gecko/20100101 Firefox/95.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:95.0) Gecko/20100101 Firefox/95.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36 Edg/96.0.1054.62'
         ]
         
         for i in range(pool_size):
             session = requests.Session()
             retries = Retry(
-                total=15,  # Increased total retries
-                backoff_factor=1.5,  # Increased backoff factor for more aggressive exponential backoff
+                total=20,  # Increased total retries
+                backoff_factor=2.0,  # More aggressive exponential backoff
                 status_forcelist=[429, 500, 502, 503, 504],
                 allowed_methods=['HEAD', 'GET', 'OPTIONS'],
                 respect_retry_after_header=True
             )
-            adapter = HTTPAdapter(max_retries=retries, pool_connections=25, pool_maxsize=25)  # Reduced connection pool size
+            adapter = HTTPAdapter(
+                max_retries=retries, 
+                pool_connections=50,  # Increased connection pool
+                pool_maxsize=50,      # Increased max size
+                pool_block=False      # Non-blocking pool
+            )
             session.mount('http://', adapter)
             session.mount('https://', adapter)
             
@@ -170,17 +201,20 @@ def create_session_pool(pool_size=20):
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'max-age=0'
+                'Cache-Control': 'max-age=0',
+                'DNT': '1'  # Do Not Track header
             }
             session_pool.append(session)
     return session_pool
 
-# Get a session from the pool
+# Get a session from the pool with intelligent selection
 def get_session():
     with session_pool_lock:
-        if not session_pool:
+        if not session_pool or len(session_pool) < 5:
             create_session_pool()
-        return np.random.choice(session_pool)
+        # Use weighted random selection to distribute load
+        weights = np.ones(len(session_pool))
+        return np.random.choice(session_pool, p=weights/weights.sum())
 
 # Initialize session pool
 create_session_pool()
@@ -189,13 +223,13 @@ create_session_pool()
 def create_session():
     session = requests.Session()
     retries = Retry(
-        total=10,
-        backoff_factor=0.5,
+        total=20,
+        backoff_factor=2.0,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=['HEAD', 'GET', 'OPTIONS'],
         respect_retry_after_header=True
     )
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=25, pool_maxsize=25)
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
     session.headers = {
@@ -204,7 +238,7 @@ def create_session():
     }
     return session
 
-# Optimized function to scrape gallery pages
+# Optimized function to scrape gallery pages with adaptive rate limiting
 def scrape_gallery_pages_optimized(gallery_id, page_count):
     # Use a thread pool for parallel page scraping
     def process_page(page_num):
@@ -212,12 +246,13 @@ def scrape_gallery_pages_optimized(gallery_id, page_count):
             # Get a session from the pool
             session = get_session()
             
-            # Add small delay between requests with more randomization and lower average
-            time.sleep(np.random.uniform(0.1, 0.8))
+            # Adaptive delay based on page number to distribute load
+            delay = np.random.uniform(0.05, 0.5) * (1 + (page_num % 3) * 0.1)
+            time.sleep(delay)
             
             # Get the page HTML
             page_html_url = f"https://nhentai.net/g/{gallery_id}/{page_num}/"
-            page_response = session.get(page_html_url, timeout=10)
+            page_response = session.get(page_html_url, timeout=15)
             
             if page_response.status_code != 200:
                 logger.warning(f"Failed to load page {page_num} HTML for gallery {gallery_id}")
@@ -234,7 +269,7 @@ def scrape_gallery_pages_optimized(gallery_id, page_count):
             image_url = img_element['src']
             
             # Download the image and process it
-            image_response = session.get(image_url, timeout=15)
+            image_response = session.get(image_url, timeout=20)
             
             if image_response.status_code == 200:
                 try:
@@ -255,15 +290,28 @@ def scrape_gallery_pages_optimized(gallery_id, page_count):
             logger.error(f"Error processing page {page_num} of gallery {gallery_id}: {e}")
             return None
     
-    # Use a thread pool to process pages in parallel - increased max_workers
+    # Use a thread pool to process pages in parallel - dynamic worker count
     results = []
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(process_page, page_num): page_num for page_num in range(1, page_count + 1)}
-        
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                results.append(result)
+    max_workers = min(MAX_WORKERS, page_count)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Process pages in batches to avoid overwhelming the server
+        batch_size = 10
+        for batch_start in range(1, page_count + 1, batch_size):
+            batch_end = min(batch_start + batch_size - 1, page_count)
+            
+            # Submit batch of pages
+            futures = {executor.submit(process_page, page_num): page_num 
+                      for page_num in range(batch_start, batch_end + 1)}
+            
+            # Process completed futures
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    results.append(result)
+            
+            # Small delay between batches to avoid rate limiting
+            if batch_end < page_count:
+                time.sleep(np.random.uniform(0.5, 1.5))
     
     # Batch insert the results into the database
     if results:
@@ -271,10 +319,15 @@ def scrape_gallery_pages_optimized(gallery_id, page_count):
         cursor = conn.cursor()
         cursor.execute('BEGIN TRANSACTION')
         try:
-            cursor.executemany(
-                'INSERT OR REPLACE INTO pages (gallery_id, page_number, image_url, phash) VALUES (?, ?, ?, ?)',
-                results
-            )
+            # Use a larger batch size for better performance
+            batch_size = 100
+            for i in range(0, len(results), batch_size):
+                batch = results[i:i+batch_size]
+                cursor.executemany(
+                    'INSERT OR REPLACE INTO pages (gallery_id, page_number, image_url, phash) VALUES (?, ?, ?, ?)',
+                    batch
+                )
+            
             conn.commit()
             logger.info(f"Processed {len(results)} pages for gallery {gallery_id}")
         except Exception as e:
@@ -287,7 +340,7 @@ def scrape_gallery_pages_optimized(gallery_id, page_count):
 def scrape_gallery_pages(gallery_id, page_count, session=None):
     return scrape_gallery_pages_optimized(gallery_id, page_count)
 
-# Optimized function to scrape nhentai gallery
+# Optimized function to scrape nhentai gallery with caching
 def scrape_gallery_optimized(gallery_id, include_pages=True):
     # Check cache first
     if gallery_id in gallery_cache:
@@ -298,7 +351,8 @@ def scrape_gallery_optimized(gallery_id, include_pages=True):
         if include_pages and gallery_data.get('page_count', 0) > 0 and not gallery_data.get('pages_fetched', False):
             threading.Thread(
                 target=scrape_gallery_pages_optimized, 
-                args=(gallery_id, gallery_data['page_count'])
+                args=(gallery_id, gallery_data['page_count']),
+                daemon=True
             ).start()
             gallery_data['pages_fetched'] = True
             
@@ -309,11 +363,11 @@ def scrape_gallery_optimized(gallery_id, include_pages=True):
         session = get_session()
         
         # Add small delay to avoid rate limiting
-        time.sleep(np.random.uniform(0.2, 1.0))
+        time.sleep(np.random.uniform(0.1, 0.5))
         
         # Request the gallery page
         url = f"https://nhentai.net/g/{gallery_id}/"
-        response = session.get(url, timeout=10)
+        response = session.get(url, timeout=15)
         
         if response.status_code != 200:
             logger.warning(f"Failed to load gallery {gallery_id}, status code: {response.status_code}")
@@ -351,7 +405,7 @@ def scrape_gallery_optimized(gallery_id, include_pages=True):
         # Process thumbnail
         phash = ""
         if thumbnail_url:
-            img_response = session.get(thumbnail_url, timeout=10)
+            img_response = session.get(thumbnail_url, timeout=15)
             if img_response.status_code == 200:
                 try:
                     # Try to open the image with PIL's built-in truncated image handling
@@ -393,7 +447,8 @@ def scrape_gallery_optimized(gallery_id, include_pages=True):
         if page_count > 0 and include_pages:
             threading.Thread(
                 target=scrape_gallery_pages_optimized, 
-                args=(gallery_id, page_count)
+                args=(gallery_id, page_count),
+                daemon=True
             ).start()
             gallery_data['pages_fetched'] = True
         
@@ -406,8 +461,8 @@ def scrape_gallery_optimized(gallery_id, include_pages=True):
 def scrape_gallery(gallery_id, include_pages=True, session=None):
     return scrape_gallery_optimized(gallery_id, include_pages)
 
-# Optimized update database function
-def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=20, include_pages=True):
+# Optimized update database function with work queue and adaptive rate limiting
+def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=MAX_WORKERS, include_pages=True):
     global update_running
     update_running = True
     
@@ -423,30 +478,49 @@ def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=20
     # Progress tracking
     progress_lock = threading.Lock()
     
-    # Use a semaphore to limit concurrent requests
-    semaphore = threading.Semaphore(concurrent_galleries)
+    # Create a work queue for better load distribution
+    work_queue = queue.Queue(maxsize=concurrent_galleries * 3)
+    
+    # Adaptive rate limiting
+    rate_limit_window = []
+    rate_limit_lock = threading.Lock()
+    MAX_REQUESTS_PER_MINUTE = 300  # Adjust based on server limits
+    
+    def rate_limiter():
+        with rate_limit_lock:
+            current_time = time.time()
+            # Remove timestamps older than 60 seconds
+            while rate_limit_window and rate_limit_window[0] < current_time - 60:
+                rate_limit_window.pop(0)
+            
+            # If we're approaching the rate limit, add delay
+            if len(rate_limit_window) > MAX_REQUESTS_PER_MINUTE * 0.8:
+                delay = np.random.uniform(1.0, 3.0)
+                time.sleep(delay)
+            
+            # Add current timestamp to window
+            rate_limit_window.append(current_time)
     
     def process_gallery(gallery_id):
         nonlocal processed, successful
         
         try:
-            with semaphore:
-                # Add randomized delay to avoid rate limiting
-                time.sleep(np.random.uniform(0.2, 1.0))
+            # Apply rate limiting
+            rate_limiter()
+            
+            result = scrape_gallery_optimized(gallery_id, include_pages)
+            
+            with progress_lock:
+                processed += 1
+                if result:
+                    successful += 1
                 
-                result = scrape_gallery_optimized(gallery_id, include_pages)
-                
-                with progress_lock:
-                    processed += 1
-                    if result:
-                        successful += 1
-                    
-                    # Log progress
-                    if processed % 20 == 0:
-                        progress = (processed / total_galleries) * 100
-                        logger.info(f"Progress: {processed}/{total_galleries} ({progress:.1f}%) galleries processed. Success rate: {successful}/{processed}")
-                
-                return result
+                # Log progress
+                if processed % 20 == 0:
+                    progress = (processed / total_galleries) * 100
+                    logger.info(f"Progress: {processed}/{total_galleries} ({progress:.1f}%) galleries processed. Success rate: {successful}/{processed}")
+            
+            return result
                 
         except Exception as e:
             with progress_lock:
@@ -454,40 +528,68 @@ def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=20
             logger.error(f"Error in gallery {gallery_id}: {e}")
             return None
     
-    # Process galleries in parallel with dynamic rate limiting
-    def process_range():
-        with ThreadPoolExecutor(max_workers=concurrent_galleries) as executor:
-            futures = []
-            
-            # Submit gallery IDs in batches to avoid overwhelming the executor
-            batch_size = 100
-            for batch_start in range(start_id, end_id + 1, batch_size):
-                batch_end = min(batch_start + batch_size - 1, end_id)
-                
-                if not update_running:
-                    logger.info("Database update stopped by user")
-                    break
-                
-                # Submit jobs for this batch
-                batch_futures = []
-                for gid in range(batch_start, batch_end + 1):
-                    batch_futures.append(executor.submit(process_gallery, gid))
-                
-                # Wait for this batch to complete
-                for future in as_completed(batch_futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"Unexpected error in gallery processing thread: {e}")
+    # Worker function to process galleries from the queue
+    def worker():
+        while update_running:
+            try:
+                gallery_id = work_queue.get(timeout=1)
+                process_gallery(gallery_id)
+                work_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Worker error: {e}")
     
-    process_range()
+    # Start worker threads
+    workers = []
+    for _ in range(concurrent_galleries):
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        workers.append(t)
+    
+    # Producer function to fill the work queue
+    try:
+        # Submit gallery IDs in batches with shuffling for better distribution
+        batch_size = 1000
+        for batch_start in range(start_id, end_id + 1, batch_size):
+            batch_end = min(batch_start + batch_size - 1, end_id)
+            
+            if not update_running:
+                logger.info("Database update stopped by user")
+                break
+            
+            # Create batch and shuffle for better distribution
+            batch_ids = list(range(batch_start, batch_end + 1))
+            random.shuffle(batch_ids)
+            
+            # Add IDs to work queue
+            for gid in batch_ids:
+                while update_running:
+                    try:
+                        work_queue.put(gid, timeout=1)
+                        break
+                    except queue.Full:
+                        time.sleep(0.1)
+                        continue
+        
+        # Wait for queue to be processed
+        work_queue.join()
+        
+    finally:
+        # Cleanup
+        update_running = False
+        
+        # Wait for workers to finish
+        for w in workers:
+            w.join(timeout=1)
+    
     logger.info(f"Database update complete. Processed {processed} galleries with {successful} successful.")
 
 # Legacy function for backward compatibility
 def update_database(start_id=1, end_id=400000, max_workers=8, include_pages=True):
     return update_database_optimized(start_id, end_id, max_workers, include_pages)
 
-# Optimized find_by_image function
+# Optimized find_by_image function with parallel processing
 def find_by_image_optimized(image_file, limit=10, include_pages=True):
     start_time = time.time()
     
@@ -497,46 +599,64 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
     
     # Use an optimized query approach with indexing
     conn = get_db_connection()
-    conn.execute("PRAGMA cache_size=10000")  # Increase cache size
+    conn.execute("PRAGMA cache_size=50000")  # Increase cache size
     
     # Prepare results
     results = []
     
-    # First get potential thumbnail matches using a fast pre-filtering query
-    cursor = conn.execute("""
-    SELECT id, title, thumbnail_url, page_count, tags, phash 
-    FROM galleries 
-    WHERE phash IS NOT NULL
-    """)
-    
-    # Process thumbnail matches
-    for row in cursor:
-        gallery_id, title, thumbnail_url, page_count, tags_str, phash_str = row
+    # Process thumbnail matches in parallel
+    def process_thumbnails():
+        local_results = []
+        # First get potential thumbnail matches using a fast pre-filtering query
+        cursor = conn.execute("""
+        SELECT id, title, thumbnail_url, page_count, tags, phash 
+        FROM galleries 
+        WHERE phash IS NOT NULL
+        """)
         
-        if not phash_str:
-            continue
+        rows = cursor.fetchall()
+        
+        def process_row(row):
+            gallery_id, title, thumbnail_url, page_count, tags_str, phash_str = row
             
-        # Calculate hash difference
-        try:
-            db_hash = imagehash.hex_to_hash(phash_str)
-            diff = query_hash - db_hash
+            if not phash_str:
+                return None
+                
+            # Calculate hash difference
+            try:
+                db_hash = imagehash.hex_to_hash(phash_str)
+                diff = query_hash - db_hash
+                
+                if diff < 15:  # Threshold for similarity
+                    return {
+                        'id': gallery_id,
+                        'title': title,
+                        'thumbnail_url': thumbnail_url,
+                        'page_count': page_count,
+                        'tags': tags_str.split(',') if tags_str else [],
+                        'url': f"https://nhentai.net/g/{gallery_id}/",
+                        'similarity': 100 - (diff * 100 / 64),  # Convert diff to percentage
+                        'matched_type': 'thumbnail'
+                    }
+            except Exception as e:
+                logger.error(f"Error comparing hash for gallery {gallery_id}: {e}")
             
-            if diff < 15:  # Threshold for similarity
-                results.append({
-                    'id': gallery_id,
-                    'title': title,
-                    'thumbnail_url': thumbnail_url,
-                    'page_count': page_count,
-                    'tags': tags_str.split(',') if tags_str else [],
-                    'url': f"https://nhentai.net/g/{gallery_id}/",
-                    'similarity': 100 - (diff * 100 / 64),  # Convert diff to percentage
-                    'matched_type': 'thumbnail'
-                })
-        except Exception as e:
-            logger.error(f"Error comparing hash for gallery {gallery_id}: {e}")
+            return None
+        
+        # Process rows in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for result in executor.map(process_row, rows):
+                if result:
+                    local_results.append(result)
+        
+        return local_results
     
-    # Then check individual pages if requested
-    if include_pages:
+    # Process page matches in parallel
+    def process_pages():
+        if not include_pages:
+            return []
+            
+        local_results = []
         # Use an optimized query with JOIN and pre-filtering
         cursor = conn.execute("""
         SELECT p.gallery_id, p.page_number, p.image_url, p.phash, 
@@ -546,12 +666,13 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
         WHERE p.phash IS NOT NULL
         """)
         
-        # Process page matches
-        for row in cursor:
+        rows = cursor.fetchall()
+        
+        def process_row(row):
             gallery_id, page_number, image_url, phash_str, title, thumbnail_url, page_count, tags_str = row
             
             if not phash_str:
-                continue
+                return None
                 
             # Calculate hash difference
             try:
@@ -559,7 +680,7 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
                 diff = query_hash - db_hash
                 
                 if diff < 15:  # Threshold for similarity
-                    results.append({
+                    return {
                         'id': gallery_id,
                         'title': title,
                         'thumbnail_url': thumbnail_url,
@@ -570,9 +691,28 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
                         'matched_type': 'page',
                         'page_number': page_number,
                         'image_url': image_url
-                    })
+                    }
             except Exception as e:
                 logger.error(f"Error comparing hash for page {page_number} of gallery {gallery_id}: {e}")
+            
+            return None
+        
+        # Process rows in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for result in executor.map(process_row, rows):
+                if result:
+                    local_results.append(result)
+        
+        return local_results
+    
+    # Run both processes in parallel
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        thumbnail_future = executor.submit(process_thumbnails)
+        pages_future = executor.submit(process_pages)
+        
+        # Collect results
+        results.extend(thumbnail_future.result())
+        results.extend(pages_future.result())
     
     conn.close()
     
@@ -591,7 +731,7 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
         if len(unique_results) >= limit:
             break
     
-    end_time = time.time()
+        end_time = time.time()
     logger.info(f"Image search completed in {end_time - start_time:.2f}s, found {len(unique_results)} results")
     
     return unique_results
@@ -600,17 +740,23 @@ def find_by_image_optimized(image_file, limit=10, include_pages=True):
 def find_by_image(image_file, limit=10, include_pages=True):
     return find_by_image_optimized(image_file, limit, include_pages)
 
+# Optimized database status function
 @app.route('/api/status', methods=['GET'])
 def get_status():
     conn = get_db_connection()
     
-    # Get gallery count
-    gallery_count = conn.execute("SELECT COUNT(*) FROM galleries").fetchone()[0]
+    # Get gallery count and page count in a single query for efficiency
+    cursor = conn.execute("""
+    SELECT 
+        (SELECT COUNT(*) FROM galleries) as gallery_count,
+        (SELECT COUNT(*) FROM pages) as page_count
+    """)
     
-    # Get page count
-    page_count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    result = cursor.fetchone()
+    gallery_count = result['gallery_count']
+    page_count = result['page_count']
     
-    # Get recent updates
+    # Get recent updates with optimized query
     cursor = conn.execute("""
     SELECT id, title, last_updated 
     FROM galleries 
@@ -619,22 +765,29 @@ def get_status():
     """)
     
     recent_updates = [
-        {'id': row[0], 'title': row[1], 'timestamp': row[2]}
+        {'id': row['id'], 'title': row['title'], 'timestamp': row['last_updated']}
         for row in cursor
     ]
     
     conn.close()
     
-    return jsonify({
-        'gallery_count': gallery_count,
-        'page_count': page_count,
-        'recent_updates': recent_updates
-    })
+    # Use faster JSON serialization
+    return app.response_class(
+        response=json.dumps({
+            'gallery_count': gallery_count,
+            'page_count': page_count,
+            'recent_updates': recent_updates
+        }),
+        mimetype='application/json'
+    )
 
 # Routes
 @app.route('/')
 def index():
     return render_template('index.html')
+
+# Optimized search endpoint with memory caching
+search_cache = cachetools.TTLCache(maxsize=100, ttl=300)  # Cache results for 5 minutes
 
 @app.route('/api/search', methods=['POST'])
 def search():
@@ -648,7 +801,22 @@ def search():
     include_pages = request.form.get('search_pages', 'true').lower() == 'true'
     limit = int(request.form.get('limit', 10))
     
+    # Generate a cache key based on image content
+    file_content = file.read()
+    cache_key = hash(file_content)
+    file.seek(0)  # Reset file pointer
+    
+    # Check cache
+    if cache_key in search_cache:
+        logger.info(f"Using cached search results for {file.filename}")
+        return jsonify(search_cache[cache_key])
+    
+    # Perform search
     results = find_by_image_optimized(file, limit, include_pages)
+    
+    # Cache results
+    search_cache[cache_key] = results
+    
     return jsonify(results)
 
 @app.route('/api/update_db', methods=['POST'])
@@ -656,15 +824,15 @@ def update_db_endpoint():
     data = request.get_json()
     start_id = data.get('start_id', 1)
     end_id = data.get('end_id', 564933)  # Limit range for safety
-    concurrent_galleries = data.get('concurrent_galleries', 20)
+    concurrent_galleries = data.get('concurrent_galleries', MAX_WORKERS)
     include_pages = data.get('include_pages', True)
     
     # Start background update
     thread = threading.Thread(
         target=update_database_optimized, 
-        args=(start_id, end_id, concurrent_galleries, include_pages)
+        args=(start_id, end_id, concurrent_galleries, include_pages),
+        daemon=True
     )
-    thread.daemon = True
     thread.start()
     
     return jsonify({
@@ -678,28 +846,38 @@ def stop_update_endpoint():
     update_running = False
     return jsonify({'message': 'Database update stopping... It may take a few seconds to complete current batch.'})
 
+# Optimized database optimization endpoint
 @app.route('/api/optimize_db', methods=['POST'])
 def optimize_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # Run VACUUM to rebuild the database file
-        cursor.execute('VACUUM')
+        # Run optimizations in a specific order for best results
         
-        # Analyze tables for query optimization
+        # First analyze tables for query optimization
         cursor.execute('ANALYZE')
         
-        # Optimize WAL checkpoint
-        cursor.execute('PRAGMA wal_checkpoint(FULL)')
+        # Optimize indexes
+        cursor.execute('PRAGMA optimize')
         
-        # Optimize cache
-        cursor.execute('PRAGMA cache_size=10000')
+        # Optimize WAL checkpoint
+        cursor.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        
+        # Optimize cache and memory settings
+        cursor.execute('PRAGMA cache_size=50000')
         cursor.execute('PRAGMA temp_store=MEMORY')
+        cursor.execute('PRAGMA mmap_size=30000000000')
+        
+        # Add or rebuild missing indexes
+        cursor.execute('REINDEX')
         
         # Add missing indexes if any
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_galleries_title ON galleries(title)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pages_gallery_id_page_number ON pages(gallery_id, page_number)')
+        
+        # Finally run VACUUM to rebuild the database file
+        cursor.execute('VACUUM')
         
         conn.commit()
         return jsonify({'message': 'Database optimization completed successfully'})
@@ -711,17 +889,19 @@ def optimize_db():
 
 @app.route('/api/clear_cache', methods=['POST'])
 def clear_cache():
-    global gallery_cache
-    gallery_cache = {}
-    return jsonify({'message': 'Cache cleared successfully'})
+    global gallery_cache, search_cache
+    gallery_cache.clear()  # Clear LRU cache
+    search_cache.clear()   # Clear TTL cache
+    return jsonify({'message': 'All caches cleared successfully'})
 
 @app.route('/api/refresh_sessions', methods=['POST'])
 def refresh_sessions():
     # Recreate the session pool
-    pool_size = request.json.get('pool_size', 30)
+    pool_size = request.json.get('pool_size', MAX_WORKERS * 2)
     create_session_pool(pool_size)
     return jsonify({'message': f'Session pool refreshed with {pool_size} sessions'})
 
+# Optimized bulk fetch with work queue
 @app.route('/api/bulk_fetch', methods=['POST'])
 def bulk_fetch():
     data = request.get_json()
@@ -732,32 +912,163 @@ def bulk_fetch():
         return jsonify({'error': 'No gallery IDs provided'}), 400
     
     # Limit the number of galleries to prevent abuse
-    if len(gallery_ids) > 100:
-        return jsonify({'error': 'Too many gallery IDs. Maximum is 100 at a time'}), 400
+    if len(gallery_ids) > 500:  # Increased limit for high-performance mode
+        return jsonify({'error': 'Too many gallery IDs. Maximum is 500 at a time'}), 400
     
-    # Start background fetch
-    def fetch_galleries():
-        results = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = {executor.submit(scrape_gallery_optimized, gid, include_pages): gid for gid in gallery_ids}
-            
-            for future in as_completed(futures):
-                gid = futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"Error fetching gallery {gid}: {e}")
+    # Create a work queue for better load distribution
+    work_queue = queue.Queue()
+    for gid in gallery_ids:
+        work_queue.put(gid)
+    
+    # Track progress
+    total = len(gallery_ids)
+    completed = 0
+    completed_lock = threading.Lock()
+    
+    # Worker function
+    def worker():
+        nonlocal completed
+        while True:
+            try:
+                gid = work_queue.get(block=False)
+            except queue.Empty:
+                break
+                
+            try:
+                # Add adaptive delay to avoid rate limiting
+                time.sleep(np.random.uniform(0.1, 0.5))
+                scrape_gallery_optimized(gid, include_pages)
+                
+                with completed_lock:
+                    completed += 1
+                    if completed % 10 == 0:
+                        logger.info(f"Bulk fetch progress: {completed}/{total}")
+                        
+            except Exception as e:
+                logger.error(f"Error fetching gallery {gid}: {e}")
+            finally:
+                work_queue.task_done()
+    
+    # Start worker threads - use dynamic number based on request size
+    worker_count = min(MAX_WORKERS, len(gallery_ids))
+    threads = []
+    for _ in range(worker_count):
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        threads.append(t)
+    
+    # Start a monitoring thread
+    def monitor():
+        work_queue.join()
+        logger.info(f"Bulk fetch completed. Processed {completed} out of {total} galleries.")
+    
+    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    monitor_thread.start()
+    
+    return jsonify({
+        'message': f'Bulk fetch started for {len(gallery_ids)} galleries with {worker_count} workers'
+    })
+
+# New endpoint for advanced database statistics
+@app.route('/api/db_stats', methods=['GET'])
+def get_db_stats():
+    conn = get_db_connection()
+    
+    try:
+        stats = {}
         
-        logger.info(f"Bulk fetch completed. Fetched {len(results)} out of {len(gallery_ids)} galleries.")
+        # Get total counts
+        cursor = conn.execute("""
+        SELECT 
+            (SELECT COUNT(*) FROM galleries) as gallery_count,
+            (SELECT COUNT(*) FROM pages) as page_count,
+            (SELECT COUNT(DISTINCT gallery_id) FROM pages) as galleries_with_pages
+        """)
+        basic_stats = cursor.fetchone()
+        stats['gallery_count'] = basic_stats['gallery_count']
+        stats['page_count'] = basic_stats['page_count']
+        stats['galleries_with_pages'] = basic_stats['galleries_with_pages']
+        
+        # Get database file size
+        db_path = 'nhentai_db.sqlite'
+        if os.path.exists(db_path):
+            stats['db_size_mb'] = os.path.getsize(db_path) / (1024 * 1024)
+        
+        # Get tag statistics
+        cursor = conn.execute("""
+        SELECT tags FROM galleries WHERE tags IS NOT NULL AND tags != ''
+        """)
+        
+        tag_counts = {}
+        for row in cursor:
+            tags = row['tags'].split(',')
+            for tag in tags:
+                tag = tag.strip()
+                if tag:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        
+        # Get top 20 tags
+        top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+        stats['top_tags'] = [{'tag': tag, 'count': count} for tag, count in top_tags]
+        
+        # Get recent activity
+        cursor = conn.execute("""
+        SELECT date(last_updated) as update_date, COUNT(*) as count
+        FROM galleries
+        WHERE last_updated IS NOT NULL
+        GROUP BY update_date
+        ORDER BY update_date DESC
+        LIMIT 7
+        """)
+        
+        stats['recent_activity'] = [
+            {'date': row['update_date'], 'count': row['count']}
+            for row in cursor
+        ]
+        
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"Error getting database stats: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+# New endpoint for system performance monitoring
+@app.route('/api/system_stats', methods=['GET'])
+def get_system_stats():
+    stats = {
+        'cpu_count': CPU_COUNT,
+        'max_workers': MAX_WORKERS,
+        'session_pool_size': len(session_pool),
+        'gallery_cache_size': len(gallery_cache),
+        'search_cache_size': len(search_cache),
+        'search_cache_info': {
+            'hits': search_cache.hits,
+            'misses': search_cache.misses,
+            'maxsize': search_cache.maxsize,
+            'ttl': search_cache.ttl
+        }
+    }
     
-    thread = threading.Thread(target=fetch_galleries)
-    thread.daemon = True
-    thread.start()
+    # Add memory usage if psutil is available
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        stats['memory_usage_mb'] = process.memory_info().rss / (1024 * 1024)
+        stats['cpu_percent'] = process.cpu_percent(interval=0.1)
+        stats['system_memory'] = {
+            'total': psutil.virtual_memory().total / (1024 * 1024 * 1024),
+            'available': psutil.virtual_memory().available / (1024 * 1024 * 1024),
+            'percent': psutil.virtual_memory().percent
+        }
+    except ImportError:
+        stats['memory_info'] = 'psutil not available'
     
-    return jsonify({'message': f'Bulk fetch started for {len(gallery_ids)} galleries'})
+    return jsonify(stats)
 
 if __name__ == '__main__':
     # Use a production WSGI server like gunicorn in production
-    app.run(debug=True, threaded=True)
+    from waitress import serve
+    
+    # Create a larger thread pool for the server
+    serve(app, host='127.0.0.1', port=5000, threads=CPU_COUNT*4)
