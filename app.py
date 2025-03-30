@@ -133,21 +133,44 @@ def create_session_pool(pool_size=20):
     global session_pool
     with session_pool_lock:
         session_pool = []
-        for _ in range(pool_size):
+        
+        # List of different user agents to rotate
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (iPad; CPU OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:92.0) Gecko/20100101 Firefox/92.0'
+        ]
+        
+        for i in range(pool_size):
             session = requests.Session()
             retries = Retry(
-                total=10,
-                backoff_factor=0.5,  # Reduced backoff factor
+                total=15,  # Increased total retries
+                backoff_factor=1.5,  # Increased backoff factor for more aggressive exponential backoff
                 status_forcelist=[429, 500, 502, 503, 504],
                 allowed_methods=['HEAD', 'GET', 'OPTIONS'],
                 respect_retry_after_header=True
             )
-            adapter = HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
+            adapter = HTTPAdapter(max_retries=retries, pool_connections=25, pool_maxsize=25)  # Reduced connection pool size
             session.mount('http://', adapter)
             session.mount('https://', adapter)
+            
+            # Rotate user agents
+            user_agent = user_agents[i % len(user_agents)]
             session.headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Referer': 'https://nhentai.net/'
+                'User-Agent': user_agent,
+                'Referer': 'https://nhentai.net/',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0'
             }
             session_pool.append(session)
     return session_pool
