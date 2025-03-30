@@ -466,47 +466,102 @@ def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=MA
     global update_running
     update_running = True
     
-    # Ensure session pool is initialized
-    if len(session_pool) < concurrent_galleries:
-        create_session_pool(pool_size=concurrent_galleries * 2)
+    # Ensure session pool is initialized with more connections
+    optimal_pool_size = concurrent_galleries * 3  # Increased pool size for better throughput
+    if len(session_pool) < optimal_pool_size:
+        create_session_pool(pool_size=optimal_pool_size)
     
     # Track progress
     total_galleries = end_id - start_id + 1
     processed = 0
     successful = 0
     
-    # Progress tracking
+    # Progress tracking with atomic operations
     progress_lock = threading.Lock()
     
-    # Create a work queue for better load distribution
-    work_queue = queue.Queue(maxsize=concurrent_galleries * 3)
+    # Create a larger work queue for better load distribution
+    work_queue = queue.Queue(maxsize=concurrent_galleries * 10)  # Increased queue size
     
-    # Adaptive rate limiting
-    rate_limit_window = []
+    # Advanced adaptive rate limiting with multiple tiers
+    rate_limit_data = {
+        'windows': {
+            'short': [],  # 5-second window
+            'medium': [], # 30-second window
+            'long': []    # 60-second window
+        },
+        'limits': {
+            'short': 50,   # Max requests per 5 seconds
+            'medium': 200, # Max requests per 30 seconds
+            'long': 300    # Max requests per 60 seconds
+        },
+        'timeframes': {
+            'short': 5,
+            'medium': 30,
+            'long': 60
+        }
+    }
     rate_limit_lock = threading.Lock()
-    MAX_REQUESTS_PER_MINUTE = 300  # Adjust based on server limits
     
-    def rate_limiter():
+    # Dynamic backoff parameters
+    backoff_data = {
+        'consecutive_failures': 0,
+        'backoff_multiplier': 1.0,
+        'max_backoff': 10.0,
+        'success_streak': 0
+    }
+    backoff_lock = threading.Lock()
+    
+    def advanced_rate_limiter():
         with rate_limit_lock:
             current_time = time.time()
-            # Remove timestamps older than 60 seconds
-            while rate_limit_window and rate_limit_window[0] < current_time - 60:
-                rate_limit_window.pop(0)
+            delay = 0
             
-            # If we're approaching the rate limit, add delay
-            if len(rate_limit_window) > MAX_REQUESTS_PER_MINUTE * 0.8:
-                delay = np.random.uniform(1.0, 3.0)
+            # Update all time windows
+            for window_type in rate_limit_data['windows']:
+                timeframe = rate_limit_data['timeframes'][window_type]
+                window = rate_limit_data['windows'][window_type]
+                
+                # Remove timestamps older than the timeframe
+                while window and window[0] < current_time - timeframe:
+                    window.pop(0)
+                
+                # Calculate how close we are to the limit (as a percentage)
+                limit = rate_limit_data['limits'][window_type]
+                usage_percent = len(window) / limit
+                
+                # Apply progressive delay based on usage percentage
+                if usage_percent > 0.8:
+                    tier_delay = np.random.uniform(0.5, 2.0) * (usage_percent - 0.8) * 10
+                    delay = max(delay, tier_delay)
+            
+            # Apply dynamic backoff for consecutive failures
+            with backoff_lock:
+                if backoff_data['consecutive_failures'] > 0:
+                    failure_delay = min(
+                        backoff_data['consecutive_failures'] * backoff_data['backoff_multiplier'],
+                        backoff_data['max_backoff']
+                    )
+                    delay = max(delay, failure_delay)
+                
+                # Reduce backoff if we have a success streak
+                if backoff_data['success_streak'] > 10 and backoff_data['backoff_multiplier'] > 1.0:
+                    backoff_data['backoff_multiplier'] = max(1.0, backoff_data['backoff_multiplier'] * 0.9)
+                    backoff_data['success_streak'] = 0
+            
+            # Apply calculated delay
+            if delay > 0:
                 time.sleep(delay)
             
-            # Add current timestamp to window
-            rate_limit_window.append(current_time)
+            # Add current timestamp to all windows
+            for window_type in rate_limit_data['windows']:
+                rate_limit_data['windows'][window_type].append(current_time)
     
     def process_gallery(gallery_id):
         nonlocal processed, successful
         
         try:
-            # Apply rate limiting
-            rate_limiter()
+            # Apply advanced rate limiting
+            advanced_rate_limiter()
             
             result = scrape_gallery_optimized(gallery_id, include_pages)
             
@@ -514,76 +569,211 @@ def update_database_optimized(start_id=1, end_id=400000, concurrent_galleries=MA
                 processed += 1
                 if result:
                     successful += 1
+                    # Update success streak for dynamic backoff
+                    with backoff_lock:
+                        backoff_data['success_streak'] += 1
+                        backoff_data['consecutive_failures'] = 0
                 
-                # Log progress
+                # Log progress with more detailed information
                 if processed % 20 == 0:
                     progress = (processed / total_galleries) * 100
-                    logger.info(f"Progress: {processed}/{total_galleries} ({progress:.1f}%) galleries processed. Success rate: {successful}/{processed}")
+                    current_rate = len(rate_limit_data['windows']['medium']) / 30  # requests per second
+                    logger.info(
+                        f"Progress: {processed}/{total_galleries} ({progress:.1f}%) galleries processed. "
+                        f"Success rate: {successful}/{processed} ({(successful/processed*100):.1f}%). "
+                        f"Current rate: {current_rate:.2f} req/s"
+                    )
             
             return result
                 
         except Exception as e:
             with progress_lock:
                 processed += 1
+            
+            # Update failure count for dynamic backoff
+            with backoff_lock:
+                backoff_data['consecutive_failures'] += 1
+                backoff_data['success_streak'] = 0
+                # Increase backoff multiplier on consecutive failures
+                if backoff_data['consecutive_failures'] > 5:
+                    backoff_data['backoff_multiplier'] = min(
+                        backoff_data['backoff_multiplier'] * 1.5,
+                        backoff_data['max_backoff']
+                    )
+            
             logger.error(f"Error in gallery {gallery_id}: {e}")
             return None
     
-    # Worker function to process galleries from the queue
+    # Worker function to process galleries from the queue with adaptive behavior
     def worker():
         while update_running:
             try:
                 gallery_id = work_queue.get(timeout=1)
                 process_gallery(gallery_id)
                 work_queue.task_done()
+                
+                # Adaptive sleep based on queue size to prevent overwhelming
+                queue_size = work_queue.qsize()
+                queue_capacity = work_queue.maxsize
+                if queue_size < queue_capacity * 0.2:
+                    # Queue is getting empty, no need to slow down
+                    pass
+                elif queue_size > queue_capacity * 0.8:
+                    # Queue is very full, slow down a bit
+                    time.sleep(0.1)
+                
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"Worker error: {e}")
     
-    # Start worker threads
-    workers = []
-    for _ in range(concurrent_galleries):
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        workers.append(t)
-    
-    # Producer function to fill the work queue
-    try:
-        # Submit gallery IDs in batches with shuffling for better distribution
-        batch_size = 1000
-        for batch_start in range(start_id, end_id + 1, batch_size):
-            batch_end = min(batch_start + batch_size - 1, end_id)
-            
-            if not update_running:
-                logger.info("Database update stopped by user")
-                break
-            
-            # Create batch and shuffle for better distribution
-            batch_ids = list(range(batch_start, batch_end + 1))
-            random.shuffle(batch_ids)
-            
-            # Add IDs to work queue
-            for gid in batch_ids:
-                while update_running:
-                    try:
-                        work_queue.put(gid, timeout=1)
-                        break
-                    except queue.Full:
-                        time.sleep(0.1)
-                        continue
+    # Dynamic worker scaling based on system load
+    def monitor_and_scale_workers(initial_workers, min_workers, max_workers):
+        workers = []
+        current_worker_count = initial_workers
         
-        # Wait for queue to be processed
+        # Start initial workers
+        for _ in range(initial_workers):
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            workers.append(t)
+        
+        # Monitor and scale
+        while update_running and not work_queue.empty():
+            try:
+                # Check system load
+                system_load = 0.5  # Default value
+                try:
+                    import psutil
+                    system_load = psutil.cpu_percent(interval=1) / 100.0
+                except ImportError:
+                    pass
+                
+                # Check rate limit status
+                with rate_limit_lock:
+                    rate_usage = len(rate_limit_data['windows']['medium']) / rate_limit_data['limits']['medium']
+                
+                # Calculate target worker count based on load and rate limit
+                if system_load > 0.9 or rate_usage > 0.9:
+                    # System is overloaded or close to rate limit, reduce workers
+                    target_workers = max(min_workers, int(current_worker_count * 0.8))
+                elif system_load < 0.7 and rate_usage < 0.7:
+                    # System has capacity and we're not close to rate limit, add workers
+                    target_workers = min(max_workers, int(current_worker_count * 1.2) + 1)
+                else:
+                    # Maintain current count
+                    target_workers = current_worker_count
+                
+                # Adjust worker count if needed
+                if target_workers > current_worker_count:
+                    # Add workers
+                    for _ in range(target_workers - current_worker_count):
+                        t = threading.Thread(target=worker, daemon=True)
+                        t.start()
+                        workers.append(t)
+                    logger.info(f"Scaled up workers from {current_worker_count} to {target_workers}")
+                    current_worker_count = target_workers
+                
+                # We don't actively remove workers, just let them complete naturally
+                
+                # Sleep before next check
+                time.sleep(5)
+                
+            except Exception as e:
+                logger.error(f"Scaling error: {e}")
+                time.sleep(5)
+        
+        return workers
+    
+    # Start the worker scaling monitor in a separate thread
+    min_workers = max(4, CPU_COUNT)
+    max_workers = max(concurrent_galleries, CPU_COUNT * 8)  # Allow more workers for better throughput
+    initial_workers = min(concurrent_galleries, (min_workers + max_workers) // 2)
+    
+    scaling_thread = threading.Thread(
+        target=monitor_and_scale_workers,
+        args=(initial_workers, min_workers, max_workers),
+        daemon=True
+    )
+    scaling_thread.start()
+    
+    # Producer function to fill the work queue with smart batching
+    try:
+        # Prioritize certain ID ranges that are more likely to exist
+        # This is based on the observation that certain ID ranges have higher success rates
+        
+        # Define priority tiers with different batch sizes
+        priority_ranges = [
+            # High priority: recent IDs (more likely to exist)
+            {'start': max(start_id, end_id - 50000), 'end': end_id, 'batch_size': 100, 'shuffle': True},
+            # Medium priority: middle range
+            {'start': max(start_id, end_id - 200000), 'end': end_id - 50000, 'batch_size': 500, 'shuffle': True},
+            # Low priority: older IDs
+            {'start': start_id, 'end': min(end_id - 200000, end_id), 'batch_size': 1000, 'shuffle': True}
+        ]
+        
+        # Process each priority range
+        for priority_range in priority_ranges:
+            range_start = priority_range['start']
+            range_end = priority_range['end']
+            batch_size = priority_range['batch_size']
+            should_shuffle = priority_range['shuffle']
+            
+            if range_start >= range_end:
+                continue
+                
+            logger.info(f"Processing ID range {range_start} to {range_end} with batch size {batch_size}")
+            
+            # Submit gallery IDs in batches
+            for batch_start in range(range_start, range_end + 1, batch_size):
+                batch_end = min(batch_start + batch_size - 1, range_end)
+                
+                if not update_running:
+                    logger.info("Database update stopped by user")
+                    break
+                
+                # Create batch and optionally shuffle for better distribution
+                batch_ids = list(range(batch_start, batch_end + 1))
+                if should_shuffle:
+                    random.shuffle(batch_ids)
+                
+                # Add IDs to work queue with backpressure handling
+                for gid in batch_ids:
+                    while update_running:
+                        try:
+                            # Use shorter timeout for more responsive queue management
+                            work_queue.put(gid, timeout=0.5)
+                            break
+                        except queue.Full:
+                            # Queue is full, wait before retrying
+                            time.sleep(0.2)
+                            continue
+                
+                # Small delay between batches to allow queue processing to start
+                if batch_end < range_end:
+                    time.sleep(0.5)
+        
+        # Wait for queue to be processed with progress reporting
+        last_processed = 0
+        while not work_queue.empty() and update_running:
+            with progress_lock:
+                if processed != last_processed:
+                    remaining = work_queue.qsize()
+                    logger.info(f"Waiting for {remaining} remaining items in queue. Processed so far: {processed}")
+                    last_processed = processed
+            time.sleep(5)
+        
+        # Final wait for queue to be fully processed
         work_queue.join()
         
     finally:
         # Cleanup
         update_running = False
         
-        # Wait for workers to finish
-        for w in workers:
-            w.join(timeout=1)
+        # Wait for scaling thread to finish
+        scaling_thread.join(timeout=2)
     
-    logger.info(f"Database update complete. Processed {processed} galleries with {successful} successful.")
+    logger.info(f"Database update complete. Processed {processed} galleries with {successful} successful ({(successful/processed*100 if processed else 0):.1f}%).")
 
 # Legacy function for backward compatibility
 def update_database(start_id=1, end_id=400000, max_workers=8, include_pages=True):
