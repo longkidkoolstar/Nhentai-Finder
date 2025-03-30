@@ -632,7 +632,7 @@ def search():
 def update_db_endpoint():
     data = request.get_json()
     start_id = data.get('start_id', 1)
-    end_id = data.get('end_id', 400000)  # Limit range for safety
+    end_id = data.get('end_id', 564933)  # Limit range for safety
     concurrent_galleries = data.get('concurrent_galleries', 20)
     include_pages = data.get('include_pages', True)
     
