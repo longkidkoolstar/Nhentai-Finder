@@ -155,28 +155,42 @@ async def scrape_gallery_page(session, gallery_id, page_num):
         async with session.get(image_url) as image_response:
             if image_response.status == 200:
                 image_data = await image_response.read()
-                page_img = Image.open(io.BytesIO(image_data))
-                page_phash = str(imagehash.phash(page_img))
-                
-                # Store page info in database
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute('''
-                INSERT OR REPLACE INTO pages (gallery_id, page_number, image_url, phash)
-                VALUES (?, ?, ?, ?)
-                ''', (gallery_id, page_num, image_url, page_phash))
-                conn.commit()
-                conn.close()
-                
-                print(f"Processed page {page_num} of gallery {gallery_id}")
-                return True
+                for attempt in range(3):  # retry up to 3 times
+                    try:
+                        page_img = Image.open(io.BytesIO(image_data))
+                        page_phash = str(imagehash.phash(page_img))
+                        
+                        # Store page info in database
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                        INSERT OR REPLACE INTO pages (gallery_id, page_number, image_url, phash)
+                        VALUES (?, ?, ?, ?)
+                        ''', (gallery_id, page_num, image_url, page_phash))
+                        conn.commit()
+                        conn.close()
+                        
+                        print(f"Processed page {page_num} of gallery {gallery_id}")
+                        return True
+                    except IOError as e:
+                        if "truncated" in str(e):
+                            # Log the error and retry
+                            print(f"Error processing page {page_num} of gallery {gallery_id} (attempt {attempt + 1}/3): {e}")
+                            await asyncio.sleep(1)  # wait 1 second before retrying
+                        else:
+                            # Raise the exception
+                            raise
+                else:
+                    # Log the error and continue processing
+                    print(f"Error processing page {page_num} of gallery {gallery_id}: failed after 3 retries")
+                    return False
             else:
                 print(f"Failed to download image for page {page_num} of gallery {gallery_id}")
                 return False
-                
+
     except Exception as e:
-        print(f"Error processing page {page_num} of gallery {gallery_id}: {e}")
-        return False
+            print(f"Error processing page {page_num} of gallery {gallery_id}: {e}")
+            return False
 
 async def scrape_gallery_pages(session, gallery_id, page_count):
     # Process pages in batches of 5
@@ -282,14 +296,25 @@ async def scrape_gallery(session, gallery_id, include_pages=True):
         print(f"Error scraping gallery {gallery_id}: {e}")
         return None
 
-async def process_gallery_batch(batch, include_pages=True):
+async def process_gallery_batch(batch, include_pages=True, retry_count=3, delay=1):
     async with await get_session() as session:
         for gallery_id in batch:
-            try:
-                await scrape_gallery(session, gallery_id, include_pages)
-                print(f"Processed gallery {gallery_id}")
-            except Exception as e:
-                print(f"Error processing gallery {gallery_id}: {e}")
+            for attempt in range(retry_count + 1):
+                try:
+                    await scrape_gallery(session, gallery_id, include_pages)
+                    print(f"Processed gallery {gallery_id}")
+                    break
+                except Exception as e:
+                    if "truncated" in str(e):
+                        # Log the error and retry
+                        print(f"Error processing gallery {gallery_id} (attempt {attempt + 1}/{retry_count + 1}): {e}")
+                        await asyncio.sleep(delay)
+                    else:
+                        # Raise the exception
+                        raise
+            else:
+                # Log the error and continue processing
+                print(f"Error processing gallery {gallery_id}: failed after {retry_count} retries")
 
 async def update_database_async(start_id=1, end_id=400000, include_pages=True):
     # Split the work into batches
