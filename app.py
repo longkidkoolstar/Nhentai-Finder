@@ -62,7 +62,7 @@ init_db()
 
 # Rate limiter class
 class RateLimiter:
-    def __init__(self, requests_per_minute=25):  # Increased from 20
+    def __init__(self, requests_per_minute=120):  # Increased from default of 25
         self.request_times = []
         self.requests_per_minute = requests_per_minute
         self.lock = asyncio.Lock()
@@ -71,12 +71,12 @@ class RateLimiter:
         async with self.lock:
             current_time = time.time()
             # Remove old requests from tracking
-            self.request_times = [t for t in self.request_times if current_time - t < 45]  # Reduced from 60
+            self.request_times = [t for t in self.request_times if current_time - t < 1]  # Reduced from default of 45
             
             if len(self.request_times) >= self.requests_per_minute:
                 # Calculate wait time to stay under limit
                 oldest_request = min(self.request_times)
-                wait_time = 30 - (current_time - oldest_request)  # Reduced from 60
+                wait_time = 1 - (current_time - oldest_request)  # Reduced from 30
                 if wait_time > 0:
                     await asyncio.sleep(wait_time)
             
